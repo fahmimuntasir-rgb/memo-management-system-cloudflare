@@ -1,0 +1,12 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL,identifier TEXT NOT NULL UNIQUE,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+CREATE TABLE departments(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,name TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,FOREIGN KEY(organization_id) REFERENCES organizations(id));
+CREATE TABLE users(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,department_id TEXT,name TEXT NOT NULL,email TEXT NOT NULL COLLATE NOCASE,password_hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN('admin','user')),status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(organization_id,email),FOREIGN KEY(organization_id) REFERENCES organizations(id),FOREIGN KEY(department_id) REFERENCES departments(id));
+CREATE TABLE sessions(id_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,organization_id TEXT NOT NULL,expires_at TEXT NOT NULL,created_at TEXT NOT NULL,last_seen_at TEXT NOT NULL,user_agent TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(organization_id) REFERENCES organizations(id));
+CREATE TABLE password_resets(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires_at TEXT NOT NULL,used_at TEXT,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+CREATE TABLE memos(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,author_id TEXT NOT NULL,department_id TEXT,reference_no TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,status TEXT NOT NULL,priority TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(organization_id,reference_no),FOREIGN KEY(organization_id) REFERENCES organizations(id),FOREIGN KEY(author_id) REFERENCES users(id));
+CREATE TABLE audit_logs(id TEXT PRIMARY KEY,organization_id TEXT NOT NULL,user_id TEXT,event_type TEXT NOT NULL,entity_type TEXT,entity_id TEXT,description TEXT NOT NULL,created_at TEXT NOT NULL,FOREIGN KEY(organization_id) REFERENCES organizations(id),FOREIGN KEY(user_id) REFERENCES users(id));
+CREATE INDEX idx_users_org ON users(organization_id);
+CREATE INDEX idx_sessions_expiry ON sessions(expires_at);
+CREATE INDEX idx_memos_org ON memos(organization_id);
+CREATE INDEX idx_audit_org ON audit_logs(organization_id);
