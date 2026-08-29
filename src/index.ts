@@ -6,7 +6,7 @@ const b64=(a:ArrayBuffer|Uint8Array)=>{let s="";for(const b of new Uint8Array(a)
 const unb64=(s:string)=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 const random=(n=32)=>{const a=new Uint8Array(n);crypto.getRandomValues(a);return b64(a).replace(/[+/=]/g,"")};
 async function sha(v:string){return b64(await crypto.subtle.digest("SHA-256",enc.encode(v)))}
-async function hashPassword(password:string,salt=random(18),iterations=100000){const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);const bits=await crypto.subtle.deriveBits({name:"PBKDF2",hash:"SHA-256",salt:typeof salt==="string"?enc.encode(salt):salt,iterations},key,256);return `pbkdf2_sha256$${iterations}$${b64(enc.encode(salt))}$${b64(bits)}`}
+async function hashPassword(password:string,salt=random(18),iterations=210000){const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);const bits=await crypto.subtle.deriveBits({name:"PBKDF2",hash:"SHA-256",salt:typeof salt==="string"?enc.encode(salt):salt,iterations},key,256);return `pbkdf2_sha256$${iterations}$${b64(enc.encode(salt))}$${b64(bits)}`}
 async function verifyPassword(password:string,stored:string){try{const[,i,s,h]=stored.split("$");const salt=new TextDecoder().decode(unb64(s));const actual=(await hashPassword(password,salt,Number(i))).split("$")[3];const a=unb64(actual),b=unb64(h);if(a.length!==b.length)return false;let d=0;for(let x=0;x<a.length;x++)d|=a[x]^b[x];return d===0}catch{return false}}
 function cookie(req:Request,name:string){return req.headers.get("cookie")?.split(";").map(x=>x.trim()).find(x=>x.startsWith(name+"="))?.slice(name.length+1)}
 function sessionCookie(value:string,maxAge:number){return `mf_session=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`}
@@ -210,7 +210,21 @@ async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>
  if(delegation&&req.method==="PATCH"){
   const id=delegation[1],row:any=await env.DB.prepare("SELECT id,delegate_id FROM delegations WHERE id=? AND organization_id=? AND delegator_id=?").bind(id,u.organization_id,u.id).first();if(!row)return json({error:"Delegation not found or access denied."},404);await env.DB.prepare("UPDATE delegations SET status='cancelled' WHERE id=? AND organization_id=? AND delegator_id=?").bind(id,u.organization_id,u.id).run();await audit(env,u,"DELEGATION_CANCELLED",id,"Workflow delegation cancelled");await notifyUsers(env,u.organization_id,[row.delegate_id],null,"DELEGATION_CANCELLED",u.name+" cancelled a workflow delegation");return json({ok:true});
  }
- if(path==="/api/v2/admin/reports"&&req.method==="GET"){if(u.role!=="admin")return json({error:"Administrator authority required."},403);const rows=await env.DB.prepare("SELECT status,COUNT(*) count FROM memos WHERE organization_id=? GROUP BY status ORDER BY status").bind(u.organization_id).all();return json({by_status:rows.results})}
+ if(path==="/api/v2/admin/reports"&&req.method==="GET"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);
+  const from=(url.searchParams.get("from")||"").trim(),to=(url.searchParams.get("to")||"").trim(),where=["m.organization_id=?"],args:any[]=[u.organization_id];
+  if(from){where.push("m.created_at>=?");args.push(from+"T00:00:00.000Z")}if(to){where.push("m.created_at<=?");args.push(to+"T23:59:59.999Z")}
+  const scope=" WHERE "+where.join(" AND "),query=(select:string,suffix="")=>env.DB.prepare(select+scope+suffix).bind(...args);
+  const [summary,statuses,priorities,departments,authors,recent]=await Promise.all([
+   query(`SELECT COUNT(*) total,SUM(CASE WHEN m.status<>'Draft' THEN 1 ELSE 0 END) submitted,SUM(CASE WHEN m.status='Pending Approval' THEN 1 ELSE 0 END) pending,SUM(CASE WHEN m.status='Approved' THEN 1 ELSE 0 END) approved,SUM(CASE WHEN m.status='Rejected' THEN 1 ELSE 0 END) rejected,SUM(CASE WHEN m.priority='Urgent' THEN 1 ELSE 0 END) urgent,ROUND(AVG(CASE WHEN m.completed_at IS NOT NULL AND m.submitted_at IS NOT NULL THEN (julianday(m.completed_at)-julianday(m.submitted_at))*24 END),1) average_completion_hours FROM memos m`).first(),
+   query("SELECT m.status label,COUNT(*) count FROM memos m"," GROUP BY m.status ORDER BY count DESC,m.status").all(),
+   query("SELECT m.priority label,COUNT(*) count FROM memos m"," GROUP BY m.priority ORDER BY CASE m.priority WHEN 'Urgent' THEN 1 WHEN 'High' THEN 2 ELSE 3 END").all(),
+   query("SELECT COALESCE(d.name,'Unassigned') label,COUNT(*) count FROM memos m LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id"," GROUP BY COALESCE(d.name,'Unassigned') ORDER BY count DESC,label").all(),
+   query("SELECT x.name label,COUNT(*) count FROM memos m JOIN users x ON x.id=m.author_id AND x.organization_id=m.organization_id"," GROUP BY x.id,x.name ORDER BY count DESC,x.name LIMIT 10").all(),
+   query("SELECT m.reference_no,m.subject,m.status,m.priority,m.created_at,m.submitted_at,m.completed_at,x.name author,COALESCE(d.name,'Unassigned') department FROM memos m JOIN users x ON x.id=m.author_id AND x.organization_id=m.organization_id LEFT JOIN departments d ON d.id=m.department_id AND d.organization_id=m.organization_id"," ORDER BY m.created_at DESC LIMIT 100").all()
+  ]);
+  return json({organization:u.organization_name,period:{from:from||null,to:to||null},summary:summary||{},by_status:statuses.results,by_priority:priorities.results,by_department:departments.results,by_author:authors.results,recent:recent.results,generated_at:new Date().toISOString()});
+ }
  if(path==="/api/v2/admin/setup"&&req.method==="GET"){
   if(u.role!=="admin")return json({error:"Administrator authority required."},403);
   const [departments,categories,templates,steps]=await Promise.all([env.DB.prepare("SELECT * FROM departments WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM categories WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM workflow_templates WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT s.* FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? ORDER BY s.template_id,s.position").bind(u.organization_id).all()]);
