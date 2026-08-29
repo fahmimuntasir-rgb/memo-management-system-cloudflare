@@ -1,79 +1,98 @@
-# MemoFlow Secure Inter-Office Memo Management
+# MemoFlow — Secure Inter-Office Memo Management
 
-Cloudflare Workers and D1 version with application-owned email/password authentication.
+MemoFlow is a multi-organization memo and approval system built with Cloudflare Workers, D1 SQLite, and a browser interface.
 
-## Security features
+Live demo: `https://memo-management-system-cloudflare.fahmimuntasir.workers.dev`
 
-- PBKDF2-SHA256 password hashing with 210,000 iterations and per-user salts.
-- Opaque sessions; only token hashes are stored.
-- HttpOnly, Secure and SameSite=Strict session cookies.
-- Server-side authentication and administrator checks.
-- Every protected query takes the organization ID from the authenticated session.
-- Prepared D1 statements and validated input.
-- Single-use, hashed, 30-minute password-reset tokens.
-- Existing sessions are revoked after a password reset.
-- Generic reset responses prevent account discovery.
-- Origin checks and immutable audit events.
+## Features
 
-## Demonstration accounts
+- Tenant-isolated administrator and user accounts.
+- Secure authentication, password reset, profiles, and user administration.
+- Draft editing, submission, revision, resubmission, versions, and audit history.
+- Ordered approval workflows with approve, reject, request changes, and comments.
+- Time-bounded workflow delegation and delegated action tracking.
+- D1 attachments for PDF, PNG, JPG, TXT, DOC, and DOCX files up to 750 KB.
+- Departments, categories, and reusable workflow templates.
+- Advanced memo search, filters, sorting, and date ranges.
+- Workflow notifications with individual and bulk read controls.
+- Organization reports, statistics, CSV export, and print/PDF output.
+- Organization name, HTTPS logo, contact information, and safe rich-text formatting.
+
+## Demo accounts
 
 | Organization | Role | Email | Password |
 |---|---|---|---|
-| Northstar Group | Administrator | admin@northstar.demo | DemoAdmin!2026 |
-| Northstar Group | Regular user | user@northstar.demo | DemoUser!2026 |
-| Riverside Institute | Administrator | admin@riverside.demo | RiversideAdmin!2026 |
+| Northstar Group | Administrator | `admin@northstar.demo` | `DemoAdmin!2026` |
+| Northstar Group | User | `user@northstar.demo` | `DemoUser!2026` |
+| Riverside Institute | Administrator | `admin@riverside.demo` | `RiversideAdmin!2026` |
 
-Replace demonstration credentials before real organizational use.
-
-## Upload to GitHub
-
-1. Extract memo-management-system.zip.
-2. Open the empty GitHub repository.
-3. Select uploading an existing file.
-4. Drag all extracted files and folders into the upload area.
-5. Use the commit message: Initial secure MemoFlow application.
-6. Select Commit changes.
-
-## Cloudflare setup
-
-1. Open Storage and databases, then D1 SQL database.
-2. Create a database named memo-management-db.
-3. Copy the database ID.
-4. In GitHub, edit wrangler.jsonc and replace REPLACE_WITH_D1_DATABASE_ID.
-5. Return to Workers and Pages and import the repository.
-6. Select branch main.
-7. Leave Build command blank.
-8. Set Deploy command to: npx wrangler deploy
-9. Deploy the project.
-
-## Initialize the database
-
-On a computer with Node.js:
-
-    npm install
-    npx wrangler login
-    npm run db:remote
-    npm run seed:remote
-
-Run migrations and the seed only once.
-
-## Optional reset emails
-
-Without email settings, reset displays a temporary demonstration token. For real email delivery, add Worker secrets RESEND_API_KEY and RESET_FROM_EMAIL. Never commit secrets to GitHub.
-
-## Local development
-
-    npm install
-    npm run db:local
-    npm run seed:local
-    npm run dev
+Replace all demo credentials before real use.
 
 ## Architecture
 
-Browser to Cloudflare Worker API to D1 database.
+The browser loads assets from Cloudflare Workers Assets. `/api/*` requests run through `src/index.ts`, which authenticates the session, applies role and organization authorization, and uses prepared statements with D1.
 
-The Worker serves the frontend and handles authentication, authorization, resets, memos and administrator actions. D1 stores organizations, users, hashes, sessions, tokens, memos and audit records.
+- `src/` — Worker API and security logic.
+- `public/` — browser interface.
+- `migrations/` — D1 schema migrations.
+- `tests/` — automated security checks.
+- `seed.sql` — demo data for a new empty database only.
 
-## Limitation
+## Security
 
-Real password-reset email delivery requires a transactional-email account. Until configured, the application displays the reset token for course demonstration.
+- PBKDF2-SHA256 with 210,000 iterations and per-user salts.
+- Opaque sessions; only SHA-256 token hashes are stored.
+- `HttpOnly`, `Secure`, `SameSite=Strict` cookies.
+- Same-origin validation for state-changing requests.
+- Server-side roles and organization IDs taken from authenticated sessions.
+- Prepared D1 statements and validated input.
+- Hashed, single-use, 30-minute reset tokens and session revocation.
+- Attachment type/size validation and HTTPS-only logo URLs.
+- Escaped rich-text rendering to prevent script injection.
+- Tenant-scoped memos, notifications, reports, delegation, and audit logs.
+
+## Fresh Cloudflare installation
+
+1. Create a D1 database named `memo-management-db`.
+2. Put its database ID in `wrangler.jsonc` in place of `REPLACE_WITH_D1_DATABASE_ID`.
+3. Run `npm install` and `npx wrangler login`.
+4. Apply all migrations once with `npm run db:remote`.
+5. On a new empty demo database only, run `npm run seed:remote` once.
+6. Deploy with `npm run deploy`, or connect GitHub with deploy command `npx wrangler deploy`.
+
+Do not run `seed:remote` on the existing live database. Do not manually rerun migrations already recorded by Wrangler.
+
+## Local development and testing
+
+```bash
+npm install
+npm run db:local
+npm run seed:local
+npm run dev
+```
+
+```bash
+npm test
+npx tsc --noEmit
+```
+
+## Optional reset email
+
+For real password-reset email, configure `RESEND_API_KEY` and `RESET_FROM_EMAIL` as Worker secrets. Without them, the course demo displays a temporary reset token. Never commit secrets.
+
+## Basic operation
+
+1. Administrators configure users, departments, categories, templates, and branding.
+2. An author creates a memo and ordered workflow, then submits it.
+3. Current participants act from Inbox; later steps activate sequentially.
+4. Authors revise and resubmit when changes are requested.
+5. Administrators use Reports for statistics, CSV, and PDF output.
+
+## Limitations
+
+- Attachments are limited to 750 KB because they are stored in D1.
+- Logo display depends on the supplied HTTPS image URL.
+- Production reset email needs a transactional email provider.
+- Demo accounts and records are not suitable for confidential production data.
+
+See `FINAL_VERIFICATION.md` for the final checklist.
