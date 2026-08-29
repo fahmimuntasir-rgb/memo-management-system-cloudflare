@@ -41,14 +41,15 @@ async function canReadMemo(env:Env,u:User,id:string){
 async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>{
  const url=new URL(req.url);
  if(path==="/api/v2/options"&&req.method==="GET"){
-  const [users,depts,cats,templates,templateSteps]=await Promise.all([
+  const [users,depts,cats,templates,templateSteps,organization]=await Promise.all([
    env.DB.prepare("SELECT id,name,email,designation,department_id FROM users WHERE organization_id=? AND status='active' ORDER BY name").bind(u.organization_id).all(),
    env.DB.prepare("SELECT id,name,active FROM departments WHERE organization_id=? AND active=1 ORDER BY name").bind(u.organization_id).all(),
    env.DB.prepare("SELECT id,name,description,active FROM categories WHERE organization_id=? AND active=1 ORDER BY name").bind(u.organization_id).all(),
    env.DB.prepare("SELECT id,name,description FROM workflow_templates WHERE organization_id=? AND active=1 ORDER BY name").bind(u.organization_id).all(),
-   env.DB.prepare("SELECT s.template_id,s.position,s.label,s.action_type FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? AND t.active=1 ORDER BY s.template_id,s.position").bind(u.organization_id).all()
+   env.DB.prepare("SELECT s.template_id,s.position,s.label,s.action_type FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? AND t.active=1 ORDER BY s.template_id,s.position").bind(u.organization_id).all(),
+   env.DB.prepare("SELECT name,logo_url,contact_info FROM organizations WHERE id=?").bind(u.organization_id).first()
   ]);
-  return json({users:users.results,departments:depts.results,categories:cats.results,templates:(templates.results as any[]).map(t=>({...t,steps:(templateSteps.results as any[]).filter(s=>s.template_id===t.id)}))});
+  return json({users:users.results,departments:depts.results,categories:cats.results,organization,templates:(templates.results as any[]).map(t=>({...t,steps:(templateSteps.results as any[]).filter(s=>s.template_id===t.id)}))});
  }
  if(path==="/api/v2/dashboard"&&req.method==="GET"){
   const [mine,inbox,complete,urgent,unread]=await Promise.all([
@@ -227,8 +228,14 @@ async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>
  }
  if(path==="/api/v2/admin/setup"&&req.method==="GET"){
   if(u.role!=="admin")return json({error:"Administrator authority required."},403);
-  const [departments,categories,templates,steps]=await Promise.all([env.DB.prepare("SELECT * FROM departments WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM categories WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM workflow_templates WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT s.* FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? ORDER BY s.template_id,s.position").bind(u.organization_id).all()]);
-  return json({departments:departments.results,categories:categories.results,templates:(templates.results as any[]).map(t=>({...t,steps:(steps.results as any[]).filter(s=>s.template_id===t.id)}))});
+  const [organization,departments,categories,templates,steps]=await Promise.all([env.DB.prepare("SELECT name,identifier,logo_url,contact_info FROM organizations WHERE id=?").bind(u.organization_id).first(),env.DB.prepare("SELECT * FROM departments WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM categories WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM workflow_templates WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT s.* FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? ORDER BY s.template_id,s.position").bind(u.organization_id).all()]);
+  return json({organization,departments:departments.results,categories:categories.results,templates:(templates.results as any[]).map(t=>({...t,steps:(steps.results as any[]).filter(s=>s.template_id===t.id)}))});
+ }
+ if(path==="/api/v2/admin/organization"&&req.method==="PATCH"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);const b:any=await req.json().catch(()=>({})),name=String(b.name||"").trim(),logo=String(b.logo_url||"").trim(),contact=String(b.contact_info||"").trim();
+  if(name.length<2||name.length>100)return json({error:"Organization name must contain 2 to 100 characters."},400);if(logo.length>500||contact.length>500)return json({error:"Branding fields are too long."},400);
+  if(logo){try{const parsed=new URL(logo);if(parsed.protocol!=="https:")throw Error()}catch{return json({error:"Logo URL must be a valid HTTPS address."},400)}}
+  await env.DB.prepare("UPDATE organizations SET name=?,logo_url=?,contact_info=? WHERE id=?").bind(name,logo||null,contact||null,u.organization_id).run();await audit(env,u,"ORGANIZATION_BRANDING_UPDATED",u.organization_id,"Organization branding and contact information updated");return json({ok:true,name,logo_url:logo||null,contact_info:contact||null});
  }
  if(path==="/api/v2/admin/departments"&&req.method==="POST"){
   if(u.role!=="admin")return json({error:"Administrator authority required."},403);const b:any=await req.json().catch(()=>({})),name=String(b.name||"").trim();if(name.length<2)return json({error:"Department name is required."},400);try{const id=crypto.randomUUID();await env.DB.prepare("INSERT INTO departments(id,organization_id,name,active) VALUES(?,?,?,1)").bind(id,u.organization_id,name).run();await audit(env,u,"DEPARTMENT_CREATED",id,"Department created: "+name);return json({id},201)}catch{return json({error:"That department already exists."},409)}
