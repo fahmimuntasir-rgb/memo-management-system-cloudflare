@@ -72,6 +72,53 @@ async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>
   await env.DB.batch(stmts);await audit(env,u,b.submit?"MEMO_SUBMITTED":"MEMO_CREATED",id,ref+" "+status.toLowerCase());return json({id,reference_no:ref},201);
  }
  const detail=path.match(/^\/api\/v2\/memos\/([^/]+)$/);
+ if(detail&&req.method==="PATCH"){
+  const id=detail[1],b:any=await req.json().catch(()=>({}));
+  const memo:any=await env.DB.prepare("SELECT * FROM memos WHERE id=? AND organization_id=? AND author_id=?").bind(id,u.organization_id,u.id).first();
+  if(!memo)return json({error:"Memo not found or access denied."},404);
+  if(!["Draft","Changes Requested"].includes(memo.status))return json({error:"Only drafts or memos returned for changes can be edited."},409);
+  if(!b.subject?.trim()||!b.body?.trim())return json({error:"Subject and body are required."},400);
+  const now=new Date().toISOString();
+  if(memo.status==="Draft"){
+   await env.DB.batch([
+    env.DB.prepare("UPDATE memos SET subject=?,body=?,department_id=?,category_id=?,priority=?,updated_at=? WHERE id=? AND organization_id=? AND author_id=? AND status='Draft'").bind(b.subject.trim(),b.body.trim(),b.department_id||null,b.category_id||null,["Normal","High","Urgent"].includes(b.priority)?b.priority:"Normal",now,id,u.organization_id,u.id),
+    env.DB.prepare("UPDATE memo_versions SET subject=?,body=?,created_at=?,submission_note='Draft updated' WHERE memo_id=? AND organization_id=? AND version_no=?").bind(b.subject.trim(),b.body.trim(),now,id,u.organization_id,memo.version_no)
+   ]);
+   await event(env,u,id,"MEMO_MODIFIED","Draft updated");
+  }else{
+   await env.DB.batch([
+    env.DB.prepare("UPDATE memos SET subject=?,body=?,department_id=?,category_id=?,priority=?,version_no=version_no+1,updated_at=? WHERE id=? AND organization_id=? AND author_id=? AND status='Changes Requested'").bind(b.subject.trim(),b.body.trim(),b.department_id||null,b.category_id||null,["Normal","High","Urgent"].includes(b.priority)?b.priority:"Normal",now,id,u.organization_id,u.id),
+    env.DB.prepare("INSERT INTO memo_versions(id,organization_id,memo_id,version_no,editor_id,subject,body,created_at,submission_note) VALUES(?,?,?,?,?,?,?,?,?)").bind(crypto.randomUUID(),u.organization_id,id,memo.version_no+1,u.id,b.subject.trim(),b.body.trim(),now,"Revision after requested changes")
+   ]);
+   await event(env,u,id,"MEMO_REVISED","Memo revised as version "+(memo.version_no+1));
+  }
+  return json({ok:true});
+ }
+ if(detail&&req.method==="DELETE"){
+  const id=detail[1],memo:any=await env.DB.prepare("SELECT reference_no FROM memos WHERE id=? AND organization_id=? AND author_id=? AND status='Draft'").bind(id,u.organization_id,u.id).first();
+  if(!memo)return json({error:"Only the author can delete a draft."},403);
+  await event(env,u,id,"DRAFT_DELETED",memo.reference_no+" draft deleted");
+  await env.DB.prepare("DELETE FROM memos WHERE id=? AND organization_id=? AND author_id=? AND status='Draft'").bind(id,u.organization_id,u.id).run();
+  return json({ok:true});
+ }
+ const submit=path.match(/^\/api\/v2\/memos\/([^/]+)\/submit$/);
+ if(submit&&req.method==="POST"){
+  const id=submit[1],memo:any=await env.DB.prepare("SELECT * FROM memos WHERE id=? AND organization_id=? AND author_id=?").bind(id,u.organization_id,u.id).first();
+  if(!memo)return json({error:"Memo not found or access denied."},404);
+  if(!["Draft","Changes Requested"].includes(memo.status))return json({error:"This memo cannot be submitted from its current status."},409);
+  const now=new Date().toISOString();
+  let step:any;
+  if(memo.status==="Draft")step=await env.DB.prepare("SELECT * FROM workflow_steps WHERE memo_id=? AND organization_id=? ORDER BY position LIMIT 1").bind(id,u.organization_id).first();
+  else step=await env.DB.prepare("SELECT * FROM workflow_steps WHERE memo_id=? AND organization_id=? AND status='Changes Requested' ORDER BY position LIMIT 1").bind(id,u.organization_id).first();
+  if(!step)return json({error:"The memo requires at least one workflow participant."},409);
+  await env.DB.batch([
+   env.DB.prepare("UPDATE workflow_steps SET status='Current',started_at=?,completed_at=NULL,acted_by=NULL,acted_on_behalf_of=NULL,action=NULL,comment=NULL WHERE id=? AND organization_id=?").bind(now,step.id,u.organization_id),
+   env.DB.prepare("UPDATE memos SET status='Pending Approval',submitted_at=COALESCE(submitted_at,?),current_step=?,updated_at=? WHERE id=? AND organization_id=? AND author_id=?").bind(now,step.position,now,id,u.organization_id,u.id),
+   env.DB.prepare("INSERT INTO notifications(id,organization_id,user_id,memo_id,type,message,created_at) VALUES(?,?,?,?,?,?,?)").bind(crypto.randomUUID(),u.organization_id,step.participant_id,id,memo.status==="Draft"?"ACTION_REQUIRED":"MEMO_RESUBMITTED",memo.reference_no+" requires your action",now)
+  ]);
+  await event(env,u,id,memo.status==="Draft"?"MEMO_SUBMITTED":"MEMO_RESUBMITTED",memo.status==="Draft"?"Memo submitted":"Revised memo resubmitted");
+  return json({ok:true});
+ }
  if(detail&&req.method==="GET"){
   const id=detail[1];if(!await canReadMemo(env,u,id))return json({error:"Memo not found or access denied."},404);
   const [memo,steps,comments,events,versions,files]=await Promise.all([
