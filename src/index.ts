@@ -34,12 +34,14 @@ async function canReadMemo(env:Env,u:User,id:string){
 async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>{
  const url=new URL(req.url);
  if(path==="/api/v2/options"&&req.method==="GET"){
-  const [users,depts,cats]=await Promise.all([
+  const [users,depts,cats,templates,templateSteps]=await Promise.all([
    env.DB.prepare("SELECT id,name,email,designation,department_id FROM users WHERE organization_id=? AND status='active' ORDER BY name").bind(u.organization_id).all(),
-   env.DB.prepare("SELECT id,name,active FROM departments WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),
-   env.DB.prepare("SELECT id,name,description,active FROM categories WHERE organization_id=? ORDER BY name").bind(u.organization_id).all()
+   env.DB.prepare("SELECT id,name,active FROM departments WHERE organization_id=? AND active=1 ORDER BY name").bind(u.organization_id).all(),
+   env.DB.prepare("SELECT id,name,description,active FROM categories WHERE organization_id=? AND active=1 ORDER BY name").bind(u.organization_id).all(),
+   env.DB.prepare("SELECT id,name,description FROM workflow_templates WHERE organization_id=? AND active=1 ORDER BY name").bind(u.organization_id).all(),
+   env.DB.prepare("SELECT s.template_id,s.position,s.label,s.action_type FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? AND t.active=1 ORDER BY s.template_id,s.position").bind(u.organization_id).all()
   ]);
-  return json({users:users.results,departments:depts.results,categories:cats.results});
+  return json({users:users.results,departments:depts.results,categories:cats.results,templates:(templates.results as any[]).map(t=>({...t,steps:(templateSteps.results as any[]).filter(s=>s.template_id===t.id)}))});
  }
  if(path==="/api/v2/dashboard"&&req.method==="GET"){
   const [mine,inbox,complete,urgent,unread]=await Promise.all([
@@ -187,6 +189,24 @@ async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>
  if(path==="/api/v2/notifications"&&req.method==="GET"){const rows=await env.DB.prepare("SELECT * FROM notifications WHERE organization_id=? AND user_id=? ORDER BY created_at DESC LIMIT 50").bind(u.organization_id,u.id).all();return json({notifications:rows.results})}
  if(path==="/api/v2/notifications/read"&&req.method==="POST"){await env.DB.prepare("UPDATE notifications SET read_at=? WHERE organization_id=? AND user_id=? AND read_at IS NULL").bind(new Date().toISOString(),u.organization_id,u.id).run();return json({ok:true})}
  if(path==="/api/v2/admin/reports"&&req.method==="GET"){if(u.role!=="admin")return json({error:"Administrator authority required."},403);const rows=await env.DB.prepare("SELECT status,COUNT(*) count FROM memos WHERE organization_id=? GROUP BY status ORDER BY status").bind(u.organization_id).all();return json({by_status:rows.results})}
+ if(path==="/api/v2/admin/setup"&&req.method==="GET"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);
+  const [departments,categories,templates,steps]=await Promise.all([env.DB.prepare("SELECT * FROM departments WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM categories WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT * FROM workflow_templates WHERE organization_id=? ORDER BY name").bind(u.organization_id).all(),env.DB.prepare("SELECT s.* FROM workflow_template_steps s JOIN workflow_templates t ON t.id=s.template_id WHERE t.organization_id=? ORDER BY s.template_id,s.position").bind(u.organization_id).all()]);
+  return json({departments:departments.results,categories:categories.results,templates:(templates.results as any[]).map(t=>({...t,steps:(steps.results as any[]).filter(s=>s.template_id===t.id)}))});
+ }
+ if(path==="/api/v2/admin/departments"&&req.method==="POST"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);const b:any=await req.json().catch(()=>({})),name=String(b.name||"").trim();if(name.length<2)return json({error:"Department name is required."},400);try{const id=crypto.randomUUID();await env.DB.prepare("INSERT INTO departments(id,organization_id,name,active) VALUES(?,?,?,1)").bind(id,u.organization_id,name).run();await audit(env,u,"DEPARTMENT_CREATED",id,"Department created: "+name);return json({id},201)}catch{return json({error:"That department already exists."},409)}
+ }
+ if(path==="/api/v2/admin/categories"&&req.method==="POST"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);const b:any=await req.json().catch(()=>({})),name=String(b.name||"").trim();if(name.length<2)return json({error:"Category name is required."},400);try{const id=crypto.randomUUID();await env.DB.prepare("INSERT INTO categories(id,organization_id,name,description,active,created_at) VALUES(?,?,?,?,1,?)").bind(id,u.organization_id,name,String(b.description||"").trim()||null,new Date().toISOString()).run();await audit(env,u,"CATEGORY_CREATED",id,"Category created: "+name);return json({id},201)}catch{return json({error:"That category already exists."},409)}
+ }
+ if(path==="/api/v2/admin/templates"&&req.method==="POST"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);const b:any=await req.json().catch(()=>({})),name=String(b.name||"").trim(),steps=Array.isArray(b.steps)?b.steps.filter((s:any)=>String(s.label||"").trim()):[];if(name.length<2||!steps.length)return json({error:"Template name and at least one step are required."},400);const id=crypto.randomUUID(),now=new Date().toISOString(),stmts:any[]=[env.DB.prepare("INSERT INTO workflow_templates(id,organization_id,name,description,active,created_at) VALUES(?,?,?,?,1,?)").bind(id,u.organization_id,name,String(b.description||"").trim()||null,now)];steps.forEach((s:any,i:number)=>stmts.push(env.DB.prepare("INSERT INTO workflow_template_steps(id,template_id,position,label,action_type) VALUES(?,?,?,?,?)").bind(crypto.randomUUID(),id,i+1,String(s.label).trim(),s.action_type==="Review"?"Review":"Approve")));try{await env.DB.batch(stmts);await audit(env,u,"TEMPLATE_CREATED",id,"Workflow template created: "+name);return json({id},201)}catch{return json({error:"That template already exists."},409)}
+ }
+ const setupItem=path.match(/^\/api\/v2\/admin\/(departments|categories|templates)\/([^/]+)$/);
+ if(setupItem&&req.method==="PATCH"){
+  if(u.role!=="admin")return json({error:"Administrator authority required."},403);const table=setupItem[1]==="templates"?"workflow_templates":setupItem[1],id=setupItem[2],b:any=await req.json().catch(()=>({})),active=b.active?1:0;const found=await env.DB.prepare(`SELECT id FROM ${table} WHERE id=? AND organization_id=?`).bind(id,u.organization_id).first();if(!found)return json({error:"Setup item not found."},404);await env.DB.prepare(`UPDATE ${table} SET active=? WHERE id=? AND organization_id=?`).bind(active,id,u.organization_id).run();await audit(env,u,"SETUP_ITEM_UPDATED",id,setupItem[1]+" status updated");return json({ok:true});
+ }
  return null;
 }
 
