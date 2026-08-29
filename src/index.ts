@@ -119,6 +119,40 @@ async function v2(req:Request,env:Env,path:string,u:User):Promise<Response|null>
   await event(env,u,id,memo.status==="Draft"?"MEMO_SUBMITTED":"MEMO_RESUBMITTED",memo.status==="Draft"?"Memo submitted":"Revised memo resubmitted");
   return json({ok:true});
  }
+ const attachmentList=path.match(/^\/api\/v2\/memos\/([^/]+)\/attachments$/);
+ if(attachmentList&&req.method==="POST"){
+  const id=attachmentList[1],memo:any=await env.DB.prepare("SELECT id,status,author_id FROM memos WHERE id=? AND organization_id=?").bind(id,u.organization_id).first();
+  if(!memo||memo.author_id!==u.id)return json({error:"Only the memo author can upload attachments."},403);
+  if(!["Draft","Changes Requested"].includes(memo.status))return json({error:"Attachments can only be changed before submission or while revising a memo."},409);
+  const form=await req.formData().catch(()=>null),file=form?.get("file");
+  if(!(file instanceof File))return json({error:"Choose a file to upload."},400);
+  if(file.size<1||file.size>750000)return json({error:"The file must be between 1 byte and 750 KB."},400);
+  const allowed=new Set(["application/pdf","image/png","image/jpeg","text/plain","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/msword"]);
+  if(!allowed.has(file.type))return json({error:"Allowed file types: PDF, PNG, JPG, TXT, DOC and DOCX."},415);
+  const attachmentId=crypto.randomUUID(),now=new Date().toISOString(),safeName=file.name.replace(/[\\/\r\n]/g,"_").slice(0,180)||"attachment";
+  await env.DB.prepare("INSERT INTO attachments(id,organization_id,memo_id,uploaded_by,file_name,content_type,size,content,created_at) VALUES(?,?,?,?,?,?,?,?,?)").bind(attachmentId,u.organization_id,id,u.id,safeName,file.type,file.size,await file.arrayBuffer(),now).run();
+  await event(env,u,id,"ATTACHMENT_ADDED","Attachment added: "+safeName);
+  return json({id:attachmentId,file_name:safeName,size:file.size},201);
+ }
+ const attachment=path.match(/^\/api\/v2\/memos\/([^/]+)\/attachments\/([^/]+)$/);
+ if(attachment&&req.method==="GET"){
+  const [memoId,attachmentId]=[attachment[1],attachment[2]];
+  if(!await canReadMemo(env,u,memoId))return json({error:"Attachment not found or access denied."},404);
+  const file:any=await env.DB.prepare("SELECT file_name,content_type,size,content FROM attachments WHERE id=? AND memo_id=? AND organization_id=?").bind(attachmentId,memoId,u.organization_id).first();
+  if(!file)return json({error:"Attachment not found or access denied."},404);
+  const safeName=String(file.file_name).replace(/[\"\\\r\n]/g,"_");
+  return new Response(file.content,{headers:{"content-type":file.content_type||"application/octet-stream","content-length":String(file.size),"content-disposition":`attachment; filename="${safeName}"`,"cache-control":"private, no-store","x-content-type-options":"nosniff"}});
+ }
+ if(attachment&&req.method==="DELETE"){
+  const [memoId,attachmentId]=[attachment[1],attachment[2]],memo:any=await env.DB.prepare("SELECT status,author_id FROM memos WHERE id=? AND organization_id=?").bind(memoId,u.organization_id).first();
+  if(!memo||memo.author_id!==u.id)return json({error:"Only the memo author can remove attachments."},403);
+  if(!["Draft","Changes Requested"].includes(memo.status))return json({error:"Attachments can only be removed before submission or while revising a memo."},409);
+  const file:any=await env.DB.prepare("SELECT file_name FROM attachments WHERE id=? AND memo_id=? AND organization_id=?").bind(attachmentId,memoId,u.organization_id).first();
+  if(!file)return json({error:"Attachment not found."},404);
+  await env.DB.prepare("DELETE FROM attachments WHERE id=? AND memo_id=? AND organization_id=?").bind(attachmentId,memoId,u.organization_id).run();
+  await event(env,u,memoId,"ATTACHMENT_REMOVED","Attachment removed: "+file.file_name);
+  return json({ok:true});
+ }
  if(detail&&req.method==="GET"){
   const id=detail[1];if(!await canReadMemo(env,u,id))return json({error:"Memo not found or access denied."},404);
   const [memo,steps,comments,events,versions,files]=await Promise.all([
